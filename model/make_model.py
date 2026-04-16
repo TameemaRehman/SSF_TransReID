@@ -9,10 +9,8 @@ def shuffle_unit(features, shift, group, begin=1):
 
     batchsize = features.size(0)
     dim = features.size(-1)
-    # Shift Operation
     feature_random = torch.cat([features[:, begin-1+shift:], features[:, begin:begin-1+shift]], dim=1)
     x = feature_random
-    # Patch Shuffle Operation
     try:
         x = x.view(batchsize, group, -1, dim)
     except:
@@ -45,6 +43,16 @@ def weights_init_classifier(m):
         nn.init.normal_(m.weight, std=0.001)
         if m.bias:
             nn.init.constant_(m.bias, 0.0)
+
+
+def _freeze_non_ssf(named_params):
+    """
+    Helper: freeze every parameter whose name does not contain 'ssf'.
+    Used identically for self.base, self.b1, and self.b2.
+    """
+    for n, p in named_params:
+        if 'ssf' not in n:
+            p.requires_grad = False
 
 
 class Backbone(nn.Module):
@@ -81,10 +89,10 @@ class Backbone(nn.Module):
         self.bottleneck.bias.requires_grad_(False)
         self.bottleneck.apply(weights_init_kaiming)
 
-    def forward(self, x, label=None):  # label is unused if self.cos_layer == 'no'
+    def forward(self, x, label=None):
         x = self.base(x)
         global_feat = nn.functional.avg_pool2d(x, x.shape[2:4])
-        global_feat = global_feat.view(global_feat.shape[0], -1)  # flatten to (bs, 2048)
+        global_feat = global_feat.view(global_feat.shape[0], -1)
 
         if self.neck == 'no':
             feat = global_feat
@@ -142,7 +150,8 @@ class build_transformer(nn.Module):
             view_num = 0
 
         self.base = factory[cfg.MODEL.TRANSFORMER_TYPE](img_size=cfg.INPUT.SIZE_TRAIN, sie_xishu=cfg.MODEL.SIE_COE,
-                                                        camera=camera_num, view=view_num, stride_size=cfg.MODEL.STRIDE_SIZE, drop_path_rate=cfg.MODEL.DROP_PATH,
+                                                        local_feature=cfg.MODEL.JPM, camera=camera_num, view=view_num,
+                                                        stride_size=cfg.MODEL.STRIDE_SIZE, drop_path_rate=cfg.MODEL.DROP_PATH,
                                                         drop_rate=cfg.MODEL.DROP_OUT,
                                                         attn_drop_rate=cfg.MODEL.ATT_DROP_RATE,
                                                         ssf_enabled=cfg.PEFT.SSF.ENABLED,
@@ -153,11 +162,15 @@ class build_transformer(nn.Module):
             self.base.load_param(model_path)
             print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
+        # ----------------------------------------------------------------
+        # SSF freezing — strictly follows SSF paper:
+        # freeze ALL backbone params except those with 'ssf' in their name.
+        # Re-ID head (bottleneck, classifier) is NOT in self.base so it
+        # remains trainable automatically.
+        # ----------------------------------------------------------------
         if cfg.PEFT.SSF.ENABLED and cfg.PEFT.SSF.FREEZE_BACKBONE:
-            for n, p in self.base.named_parameters():
-                if 'ssf' not in n:
-                    p.requires_grad = False
-            print('Backbone frozen — only SSF parameters are trainable')
+            _freeze_non_ssf(self.base.named_parameters())
+            print('Backbone frozen — only SSF parameters are trainable in self.base')
 
         self.gap = nn.AdaptiveAvgPool2d(1)
 
@@ -187,7 +200,7 @@ class build_transformer(nn.Module):
         self.bottleneck.bias.requires_grad_(False)
         self.bottleneck.apply(weights_init_kaiming)
 
-    def forward(self, x, label=None, cam_label= None, view_label=None):
+    def forward(self, x, label=None, cam_label=None, view_label=None):
         global_feat = self.base(x, cam_label=cam_label, view_label=view_label)
 
         feat = self.bottleneck(global_feat)
@@ -198,13 +211,11 @@ class build_transformer(nn.Module):
             else:
                 cls_score = self.classifier(feat)
 
-            return cls_score, global_feat  # global feature for triplet loss
+            return cls_score, global_feat
         else:
             if self.neck_feat == 'after':
-                # print("Test with feature after BN")
                 return feat
             else:
-                # print("Test with feature before BN")
                 return global_feat
 
     def load_param(self, trained_path):
@@ -252,12 +263,20 @@ class build_transformer_local(nn.Module):
             self.base.load_param(model_path)
             print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
+        # ----------------------------------------------------------------
+        # SSF freezing for backbone — strictly follows SSF paper.
+        # Must be done BEFORE deepcopy so b1/b2 inherit the correct
+        # requires_grad state from the last block.
+        # ----------------------------------------------------------------
         if cfg.PEFT.SSF.ENABLED and cfg.PEFT.SSF.FREEZE_BACKBONE:
-            for n, p in self.base.named_parameters():
-                if 'ssf' not in n:
-                    p.requires_grad = False
-            print('Backbone frozen — only SSF parameters are trainable')
+            _freeze_non_ssf(self.base.named_parameters())
+            print('Backbone frozen — only SSF parameters are trainable in self.base')
 
+        # ----------------------------------------------------------------
+        # JPM branch construction via deepcopy.
+        # deepcopy copies both weights AND requires_grad flags, so b1/b2
+        # inherit the correct frozen/trainable state from the last block.
+        # ----------------------------------------------------------------
         block = self.base.blocks[-1]
         layer_norm = self.base.norm
         self.b1 = nn.Sequential(
@@ -268,6 +287,17 @@ class build_transformer_local(nn.Module):
             copy.deepcopy(block),
             copy.deepcopy(layer_norm)
         )
+
+        # ----------------------------------------------------------------
+        # FIX: Freeze JPM branches with the same rule as self.base.
+        # Although deepcopy copies requires_grad, we apply the rule
+        # explicitly to be safe and to handle edge cases where the last
+        # block may not have SSF (if ssf_blocks excludes block 11).
+        # ----------------------------------------------------------------
+        if cfg.PEFT.SSF.ENABLED and cfg.PEFT.SSF.FREEZE_BACKBONE:
+            _freeze_non_ssf(self.b1.named_parameters())
+            _freeze_non_ssf(self.b2.named_parameters())
+            print('JPM branches (b1, b2) frozen — only SSF parameters trainable')
 
         self.num_classes = num_classes
         self.ID_LOSS_TYPE = cfg.MODEL.ID_LOSS_TYPE
@@ -323,12 +353,12 @@ class build_transformer_local(nn.Module):
         print('using divide_length size:{}'.format(self.divide_length))
         self.rearrange = rearrange
 
-    def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
+    def forward(self, x, label=None, cam_label=None, view_label=None):
 
         features = self.base(x, cam_label=cam_label, view_label=view_label)
 
         # global branch
-        b1_feat = self.b1(features) # [64, 129, 768]
+        b1_feat = self.b1(features)
         global_feat = b1_feat[:, 0]
 
         # JPM branch
@@ -340,22 +370,19 @@ class build_transformer_local(nn.Module):
             x = shuffle_unit(features, self.shift_num, self.shuffle_groups)
         else:
             x = features[:, 1:]
-        # lf_1
+
         b1_local_feat = x[:, :patch_length]
         b1_local_feat = self.b2(torch.cat((token, b1_local_feat), dim=1))
         local_feat_1 = b1_local_feat[:, 0]
 
-        # lf_2
         b2_local_feat = x[:, patch_length:patch_length*2]
         b2_local_feat = self.b2(torch.cat((token, b2_local_feat), dim=1))
         local_feat_2 = b2_local_feat[:, 0]
 
-        # lf_3
         b3_local_feat = x[:, patch_length*2:patch_length*3]
         b3_local_feat = self.b2(torch.cat((token, b3_local_feat), dim=1))
         local_feat_3 = b3_local_feat[:, 0]
 
-        # lf_4
         b4_local_feat = x[:, patch_length*3:patch_length*4]
         b4_local_feat = self.b2(torch.cat((token, b4_local_feat), dim=1))
         local_feat_4 = b4_local_feat[:, 0]
@@ -379,7 +406,7 @@ class build_transformer_local(nn.Module):
             return [cls_score, cls_score_1, cls_score_2, cls_score_3,
                         cls_score_4
                         ], [global_feat, local_feat_1, local_feat_2, local_feat_3,
-                            local_feat_4]  # global feature for triplet loss
+                            local_feat_4]
         else:
             if self.neck_feat == 'after':
                 return torch.cat(

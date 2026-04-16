@@ -165,7 +165,7 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
-
+ 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, ssf_enabled=False):
         super().__init__()
@@ -176,25 +176,57 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-
+ 
+        # ----------------------------------------------------------------
+        # SSF-ADA: inserted after all 4 operations per block.
+        # Paper (SSF, NeurIPS 2022) Table 6b ablation confirms all 4 ops.
+        #   ssf_norm1 — after LayerNorm 1  (before attention)
+        #   ssf_attn  — after Attention    (after proj_drop)
+        #   ssf_norm2 — after LayerNorm 2  (before MLP)
+        #   ssf_mlp   — after MLP          (after dropout)
+        # gamma initialised to 1, beta to 0 → identity at start.
+        # ----------------------------------------------------------------
         if ssf_enabled:
             from model.peft.ssf import SSF
-            self.ssf_attn = SSF(dim)
-            self.ssf_mlp = SSF(dim)
+            self.ssf_norm1 = SSF(dim)   # FIX: was missing
+            self.ssf_attn  = SSF(dim)   # already present
+            self.ssf_norm2 = SSF(dim)   # FIX: was missing
+            self.ssf_mlp   = SSF(dim)   # already present
         else:
-            self.ssf_attn = None
-            self.ssf_mlp = None
-
+            self.ssf_norm1 = None
+            self.ssf_attn  = None
+            self.ssf_norm2 = None
+            self.ssf_mlp   = None
+ 
     def forward(self, x):
-        attn_out = self.attn(self.norm1(x))
+        # --- Attention sub-block ---
+        # 1. LayerNorm 1
+        norm1_out = self.norm1(x)
+        # 2. SSF-ADA after norm1
+        if self.ssf_norm1 is not None:
+            norm1_out = self.ssf_norm1(norm1_out)
+        # 3. Multi-Head Self-Attention
+        attn_out = self.attn(norm1_out)
+        # 4. SSF-ADA after attention
         if self.ssf_attn is not None:
             attn_out = self.ssf_attn(attn_out)
+        # 5. Residual add
         x = x + self.drop_path(attn_out)
-
-        mlp_out = self.mlp(self.norm2(x))
+ 
+        # --- MLP sub-block ---
+        # 6. LayerNorm 2
+        norm2_out = self.norm2(x)
+        # 7. SSF-ADA after norm2
+        if self.ssf_norm2 is not None:
+            norm2_out = self.ssf_norm2(norm2_out)
+        # 8. MLP
+        mlp_out = self.mlp(norm2_out)
+        # 9. SSF-ADA after MLP
         if self.ssf_mlp is not None:
             mlp_out = self.ssf_mlp(mlp_out)
+        # 10. Residual add
         x = x + self.drop_path(mlp_out)
+ 
         return x
 
 

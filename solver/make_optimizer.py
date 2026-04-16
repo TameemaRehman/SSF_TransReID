@@ -12,6 +12,9 @@ def make_optimizer(cfg, model, center_criterion):
         weight_decay = cfg.SOLVER.WEIGHT_DECAY
 
         if 'ssf' in key:
+            # SSF parameters: higher LR (10x default), zero weight decay.
+            # Zero weight decay is important — regularising scale/shift
+            # parameters toward zero would counteract their purpose.
             lr = ssf_lr
             weight_decay = 0.0
         elif "bias" in key:
@@ -28,9 +31,14 @@ def make_optimizer(cfg, model, center_criterion):
     if cfg.SOLVER.OPTIMIZER_NAME == 'SGD':
         optimizer = getattr(torch.optim, cfg.SOLVER.OPTIMIZER_NAME)(params, momentum=cfg.SOLVER.MOMENTUM)
     elif cfg.SOLVER.OPTIMIZER_NAME == 'AdamW':
-        optimizer = torch.optim.AdamW(params, lr=cfg.SOLVER.BASE_LR, weight_decay=cfg.SOLVER.WEIGHT_DECAY)
+        # FIX: do NOT pass global lr or weight_decay here.
+        # Passing them overrides the per-parameter settings built above,
+        # which means SSF's custom lr and zero weight_decay get ignored.
+        # Passing params alone correctly uses each param group's own lr/wd.
+        optimizer = torch.optim.AdamW(params)
     else:
         optimizer = getattr(torch.optim, cfg.SOLVER.OPTIMIZER_NAME)(params)
+
     optimizer_center = torch.optim.SGD(center_criterion.parameters(), lr=cfg.SOLVER.CENTER_LR)
 
     return optimizer, optimizer_center
