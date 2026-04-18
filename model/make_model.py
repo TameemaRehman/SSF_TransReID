@@ -252,10 +252,22 @@ class build_transformer_local(nn.Module):
             view_num = view_num
         else:
             view_num = 0
+            
+        
+        # old version
+        # self.base = factory[cfg.MODEL.TRANSFORMER_TYPE](img_size=cfg.INPUT.SIZE_TRAIN, sie_xishu=cfg.MODEL.SIE_COE,
+        #                                                 local_feature=cfg.MODEL.JPM, camera=camera_num, view=view_num,
+        #                                                 stride_size=cfg.MODEL.STRIDE_SIZE, drop_path_rate=cfg.MODEL.DROP_PATH,
+        #                                                 ssf_enabled=cfg.PEFT.SSF.ENABLED,
+        #                                                 ssf_blocks=cfg.PEFT.SSF.BLOCKS)
 
+        
+        # new version
         self.base = factory[cfg.MODEL.TRANSFORMER_TYPE](img_size=cfg.INPUT.SIZE_TRAIN, sie_xishu=cfg.MODEL.SIE_COE,
                                                         local_feature=cfg.MODEL.JPM, camera=camera_num, view=view_num,
                                                         stride_size=cfg.MODEL.STRIDE_SIZE, drop_path_rate=cfg.MODEL.DROP_PATH,
+                                                        drop_rate=cfg.MODEL.DROP_OUT,
+                                                        attn_drop_rate=cfg.MODEL.ATT_DROP_RATE,
                                                         ssf_enabled=cfg.PEFT.SSF.ENABLED,
                                                         ssf_blocks=cfg.PEFT.SSF.BLOCKS)
 
