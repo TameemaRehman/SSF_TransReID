@@ -435,10 +435,21 @@ class TransReID(nn.Module):
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
         self.fc = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        
+    # old version
+    # def forward_features(self, x, camera_id, view_id):
+    #     B = x.shape[0]
+    #     x = self.patch_embed(x)
 
+    #     cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+    #     x = torch.cat((cls_tokens, x), dim=1)
+
+    # new version
     def forward_features(self, x, camera_id, view_id):
         B = x.shape[0]
         x = self.patch_embed(x)
+        if self.ssf_patch_embed is not None:
+            x = self.ssf_patch_embed(x)
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
