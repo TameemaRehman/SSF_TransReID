@@ -470,11 +470,23 @@ class TransReID(nn.Module):
                 x = blk(x)
             return x
 
+        # old version
+        # else:
+        #     for blk in self.blocks:
+        #         x = blk(x)
+
+        #     x = self.norm(x)
+
+        #     return x[:, 0]
+
+        # new version
         else:
             for blk in self.blocks:
                 x = blk(x)
 
             x = self.norm(x)
+            if self.ssf_final_norm is not None:
+                x = self.ssf_final_norm(x)
 
             return x[:, 0]
 
