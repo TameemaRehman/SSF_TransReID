@@ -390,11 +390,27 @@ class TransReID(nn.Module):
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 ssf_enabled=ssf_enabled and (len(ssf_blocks) == 0 or i in ssf_blocks))
             for i in range(depth)])
+                     
+        #old version
+        # self.norm = norm_layer(embed_dim)
 
+        # # Classifier head
+        # self.fc = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         self.norm = norm_layer(embed_dim)
+
+        #new version
+        # SSF after patch embedding projection and after final encoder norm
+        if ssf_enabled:
+            from model.peft.ssf import SSF
+            self.ssf_patch_embed = SSF(embed_dim)
+            self.ssf_final_norm  = SSF(embed_dim)
+        else:
+            self.ssf_patch_embed = None
+            self.ssf_final_norm  = None
 
         # Classifier head
         self.fc = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+                     
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.pos_embed, std=.02)
 
