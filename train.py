@@ -10,7 +10,6 @@ import torch
 import numpy as np
 import os
 import argparse
-# from timm.scheduler import create_scheduler
 from config import cfg
 
 def set_seed(seed):
@@ -22,13 +21,45 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
+def print_device_info():
+    """Print whether training is on CUDA or CPU."""
+    print("\n" + "="*60)
+    if torch.cuda.is_available():
+        print(f"  ✅ Training on GPU : {torch.cuda.get_device_name(0)}")
+        print(f"  📦 GPU Memory Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"  🔧 CUDA Version    : {torch.version.cuda}")
+    else:
+        print("  ⚠️  Training on CPU  (no CUDA GPU detected)")
+    print("="*60 + "\n")
+
+def print_trainable_params(model):
+    """Print total, trainable, and frozen parameter counts."""
+    total_params     = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params    = total_params - trainable_params
+
+    print("\n" + "="*60)
+    print("  📊 Model Parameter Summary")
+    print("-"*60)
+    print(f"  Total parameters      : {total_params:>12,}")
+    print(f"  Trainable parameters  : {trainable_params:>12,}  ✅")
+    print(f"  Frozen parameters     : {frozen_params:>12,}  🔒")
+    print(f"  Trainable ratio       : {100 * trainable_params / total_params:>11.4f}%")
+    print("="*60 + "\n")
+
+    # Also log named trainable params for transparency
+    print("  🔍 Trainable parameter groups:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"     {name:60s} | {param.numel():>10,} params")
+    print("="*60 + "\n")
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description="ReID Baseline Training")
     parser.add_argument(
         "--config_file", default="", help="path to config file", type=str
     )
-
     parser.add_argument("opts", help="Modify config options using the command-line", default=None,
                         nargs=argparse.REMAINDER)
     parser.add_argument("--local_rank", default=0, type=int)
@@ -63,9 +94,16 @@ if __name__ == '__main__':
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
+
+    # ── Device info ────────────────────────────────────────────
+    print_device_info()
+
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
 
-    model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num = view_num)
+    model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
+
+    # ── Parameter summary ──────────────────────────────────────
+    print_trainable_params(model)
 
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 

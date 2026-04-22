@@ -1,6 +1,6 @@
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: '/.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth'
+  PRETRAIN_PATH: '.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth'
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
@@ -11,7 +11,7 @@ MODEL:
   STRIDE_SIZE: [12, 12]
   SIE_CAMERA: True
   SIE_COE: 3.0
-  JPM: True
+  JPM: False
   RE_ARRANGE: True
 
 INPUT:
@@ -25,7 +25,7 @@ INPUT:
 
 DATASETS:
   NAMES: ('market1501')
-  ROOT_DIR: ('/workspace/SSF-on-Transreid/data')
+  ROOT_DIR: 'C:/Users/22K-4310/Desktop/FYP2/SSF/SSF-on-Transreid/data'
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -37,7 +37,7 @@ SOLVER:
   # SSF paper (NeurIPS 2022) Section 4.1 explicitly states AdamW is used.
   OPTIMIZER_NAME: 'AdamW'
   MAX_EPOCHS: 60
-  BASE_LR: 0.00035
+  BASE_LR: 3.0e-4
   IMS_PER_BATCH: 64
   WARMUP_METHOD: 'linear'
   WARMUP_EPOCHS: 5
@@ -45,9 +45,9 @@ SOLVER:
   CHECKPOINT_PERIOD: 60
   LOG_PERIOD: 50
   EVAL_PERIOD: 60
-  WEIGHT_DECAY: 1e-4
-  WEIGHT_DECAY_BIAS: 1e-4
-  BIAS_LR_FACTOR: 2
+  WEIGHT_DECAY: 0.05
+  WEIGHT_DECAY_BIAS: 0.05
+  BIAS_LR_FACTOR: 1
   MOMENTUM: 0.9
 
 PEFT:
@@ -71,4 +71,4 @@ TEST:
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: '../logs/market_vit_transreid_ssf'
+OUTPUT_DIR: '../logs/market_vit_transreid_ssf_sieTrue_jpmFalse'
