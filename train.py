@@ -21,38 +21,41 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
-def print_device_info():
-    """Print whether training is on CUDA or CPU."""
-    print("\n" + "="*60)
+def log_device_info(logger):
+    """Log whether training is on CUDA or CPU (file + console via logger)."""
+    logger.info("")
+    logger.info("=" * 60)
     if torch.cuda.is_available():
-        print(f"  ✅ Training on GPU : {torch.cuda.get_device_name(0)}")
-        print(f"  📦 GPU Memory Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-        print(f"  🔧 CUDA Version    : {torch.version.cuda}")
+        logger.info(f"  ✅ Training on GPU : {torch.cuda.get_device_name(0)}")
+        logger.info(
+            f"  📦 GPU Memory Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
+        )
+        logger.info(f"  🔧 CUDA Version    : {torch.version.cuda}")
     else:
-        print("  ⚠️  Training on CPU  (no CUDA GPU detected)")
-    print("="*60 + "\n")
+        logger.info("  ⚠️  Training on CPU  (no CUDA GPU detected)")
+    logger.info("=" * 60)
 
-def print_trainable_params(model):
-    """Print total, trainable, and frozen parameter counts."""
+def log_trainable_params(logger, model):
+    """Log total, trainable, and frozen parameter counts to file and console."""
     total_params     = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen_params    = total_params - trainable_params
 
-    print("\n" + "="*60)
-    print("  📊 Model Parameter Summary")
-    print("-"*60)
-    print(f"  Total parameters      : {total_params:>12,}")
-    print(f"  Trainable parameters  : {trainable_params:>12,}  ✅")
-    print(f"  Frozen parameters     : {frozen_params:>12,}  🔒")
-    print(f"  Trainable ratio       : {100 * trainable_params / total_params:>11.4f}%")
-    print("="*60 + "\n")
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("  📊 Model Parameter Summary")
+    logger.info("-" * 60)
+    logger.info(f"  Total parameters      : {total_params:>12,}")
+    logger.info(f"  Trainable parameters  : {trainable_params:>12,}  ✅")
+    logger.info(f"  Frozen parameters     : {frozen_params:>12,}  🔒")
+    logger.info(f"  Trainable ratio       : {100 * trainable_params / total_params:>11.4f}%")
+    logger.info("=" * 60)
 
-    # Also log named trainable params for transparency
-    print("  🔍 Trainable parameter groups:")
+    logger.info("  🔍 Trainable parameter groups:")
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print(f"     {name:60s} | {param.numel():>10,} params")
-    print("="*60 + "\n")
+            logger.info(f"     {name:60s} | {param.numel():>10,} params")
+    logger.info("=" * 60)
 
 if __name__ == '__main__':
 
@@ -95,15 +98,15 @@ if __name__ == '__main__':
 
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
 
-    # ── Device info ────────────────────────────────────────────
-    print_device_info()
+    # ── Device info (stdout + train_log.txt) ───────────────────
+    log_device_info(logger)
 
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
 
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
 
-    # ── Parameter summary ──────────────────────────────────────
-    print_trainable_params(model)
+    # ── Parameter summary (stdout + train_log.txt) ─────────────
+    log_trainable_params(logger, model)
 
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 
