@@ -1,177 +1,313 @@
-![Python >=3.5](https://img.shields.io/badge/Python->=3.5-yellow.svg)
-![PyTorch >=1.0](https://img.shields.io/badge/PyTorch->=1.6-blue.svg)
+![Python >=3.7](https://img.shields.io/badge/Python->=3.7-yellow.svg)
+![PyTorch >=1.6](https://img.shields.io/badge/PyTorch->=1.6-blue.svg)
+![PEFT](https://img.shields.io/badge/PEFT-SSF-green.svg)
+![Backbone](https://img.shields.io/badge/backbone-ViT--Base%20(TransReID)-orange.svg)
 
-# [ICCV2021] TransReID: Transformer-based Object Re-Identification [[pdf]](https://openaccess.thecvf.com/content/ICCV2021/papers/He_TransReID_Transformer-Based_Object_Re-Identification_ICCV_2021_paper.pdf)
+# SSF-on-TransReID: Parameter-Efficient Person Re-Identification
 
-The *official* repository for  [TransReID: Transformer-based Object Re-Identification](https://arxiv.org/abs/2102.04378) achieves state-of-the-art performances on object re-ID, including person re-ID and vehicle re-ID.
+This repository implements **Scale-and-Shift Features (SSF)** — the parameter-efficient
+fine-tuning (PEFT) method of Lian *et al.* (NeurIPS 2022) — on top of the
+[**TransReID**](https://arxiv.org/abs/2102.04378) ViT-Base backbone, and reproduces the
+**SSF experiments** reported in our paper:
 
-## News
-- 🌟 2023.11 [VGSG](https://arxiv.org/abs/2311.07514.pdf) for Text-based Person Search is accepted to TIP. 
-- 🌟 2023.9 [RGANet](https://arxiv.org/abs/2309.03558) for Occluded Person Re-identification is accepted to TIFS. 
-- 2023.3 The general human representation pre-training model. [SOLIDER](https://github.com/tinyvision/SOLIDER)
-- 2021.12 We improve TransReID via self-supervised pre-training. Please refer to [TransReID-SSL](https://github.com/michuanhaohao/TransReID-SSL)
-- 2021.3  We release the code of TransReID.
+> **Efficient Person Re-Identification via LoRA and SSF: A Comparative PEFT Study on
+> ViT Backbone in TransReID**
+> Huzaifa Naseer, Tameema Rehman, Anas Ashfaq, Farrukh Hasan Syed
+> *Department of Computer Science, FAST-NUCES, Karachi & IBA Karachi.*
 
-## Pipeline
+The paper conducts a controlled comparison of two structurally distinct PEFT methods —
+**LoRA** (weight-space, low-rank) and **SSF** (activation-space, per-channel affine) — on a
+frozen TransReID backbone under the standard Market-1501 protocol. **This repository holds
+the SSF phase.** The LoRA phase and the full combined study live in the companion repo:
+👉 https://github.com/Huzaifa9559/PEFT-on-Transreid.git
 
-![framework](figs/framework.png)
+> **Base code.** Forked from the official
+> [TransReID](https://github.com/damo-cv/TransReID) implementation. The backbone,
+> Side-Information Embedding (SIE), Jigsaw Patch Module (JPM), Re-ID head, data pipeline,
+> and evaluation protocol are **unchanged**; the only additions are the SSF PEFT modules and
+> the config/optimizer plumbing that drive them (see [Changes We Made](#changes-we-made)).
 
-## Abaltion Study of Transformer-based Strong Baseline
+---
 
-![framework](figs/ablation.png)
+## Table of Contents
+- [Motivation](#motivation)
+- [Method: SSF in a Nutshell](#method-ssf-in-a-nutshell)
+- [Changes We Made](#changes-we-made)
+- [Configuration Space](#configuration-space)
+- [Results on Market-1501](#results-on-market-1501)
+- [Installation](#installation)
+- [Prepare Data & Pretrained ViT](#prepare-data--pretrained-vit)
+- [Training SSF](#training-ssf)
+- [Evaluation](#evaluation)
+- [Verification & Sanity Tools](#verification--sanity-tools)
+- [Repository Layout](#repository-layout)
+- [Citation](#citation)
+- [Acknowledgement](#acknowledgement)
 
+---
 
+## Motivation
 
-## Requirements
+Full fine-tuning of a ViT-based Re-ID model such as TransReID is strong but expensive in
+memory and compute, and each new camera domain requires storing a full backbone copy. **PEFT**
+freezes the backbone and trains only a small task-specific set of parameters. SSF is an
+attractive PEFT choice because it:
 
-### Installation
+- learns only per-channel **scale** (`γ`) and **shift** (`β`) vectors applied to activations —
+  a **compact footprint (≈2.87 % of backbone parameters)** for full 0–11 block coverage;
+- can be **reparameterized into the preceding linear layer at inference**, adding
+  **zero extra FLOPs** at deployment;
+- is **rank-independent** and structurally different from LoRA, making it the ideal second
+  paradigm for a controlled PEFT comparison.
+
+---
+
+## Method: SSF in a Nutshell
+
+For a tensor `x` whose last dimension is the channel size `C`, SSF computes an element-wise
+affine transform:
+
+```
+SSF(x) = γ ⊙ x + β        γ, β ∈ R^C
+```
+
+`γ` is initialized to **ones** and `β` to **zeros**, so every SSF module starts as an
+**identity** — pretrained TransReID behavior is preserved exactly until optimization moves the
+parameters. With the backbone frozen, only these `γ`/`β` vectors (plus the standard Re-ID head)
+are trainable.
+
+<p align="center">
+  <img src="figs/ssf_pipeline.png" alt="SSF-on-TransReID pipeline" width="620">
+</p>
+<p align="center">
+  <em>SSF pipeline on TransReID. The ViT-B/16 backbone (all 12 blocks), patch embedding, JPM,
+  and final LayerNorm are frozen; only the SSF-ADA scale-and-shift vectors (γ, β) and the Re-ID
+  head are trainable. Each block carries four SSF-ADA modules (after LN1, attention, LN2, MLP),
+  plus global SSF at patch embedding and final norm.</em>
+</p>
+
+**SSF-ADA placement.** Within each adapted transformer block, SSF is inserted after **four**
+operation types — matching the SSF paper's full four-point recipe:
+
+| Site | Position in forward | Adapts |
+|------|---------------------|--------|
+| `ssf_norm1` | after LayerNorm-1, before attention | normalized input to MHSA |
+| `ssf_attn`  | after attention output, before residual add | relational output of MHSA |
+| `ssf_norm2` | after LayerNorm-2, before MLP | normalized input to FFN |
+| `ssf_mlp`   | after MLP output, before residual add | non-linear output of FFN |
+
+Two **global** SSF modules are also added: `ssf_patch_embed` (right after patch projection) and
+`ssf_final_norm` (after the final LayerNorm, before CLS readout).
+
+---
+
+## Changes We Made
+
+All changes are additive and **config-driven** — with `PEFT.SSF.ENABLED: False`, the code
+behaves as vanilla TransReID. Full detail lives in
+[`SSF_ON_TRANSREID_IMPLEMENTATION.md`](SSF_ON_TRANSREID_IMPLEMENTATION.md).
+
+| File | What we added | Why |
+|------|---------------|-----|
+| [`model/peft/ssf.py`](model/peft/ssf.py) | Reusable `SSF` `nn.Module` (identity-init `γ`/`β`) + `merge_ssf_into_linear` / `unmerge_ssf_from_linear` helpers for zero-FLOP inference reparameterization. | Core module. |
+| [`model/backbones/vit_pytorch.py`](model/backbones/vit_pytorch.py) | `Block` gains four SSF sites; `TransReID` gains `ssf_patch_embed` / `ssf_final_norm`; factories forward `ssf_enabled` / `ssf_blocks`. Selective-block masking via `ssf_blocks`. | Places SSF-ADA across the depth. |
+| [`model/make_model.py`](model/make_model.py) | `_freeze_non_ssf()` freezes every parameter without `'ssf'` in its name; correct freeze **order** around the JPM `deepcopy` so duplicated branches (`b1`/`b2`) never leave backbone weights trainable. | Enforces the PEFT freeze recipe, incl. the JPM edge case. |
+| [`config/defaults.py`](config/defaults.py) | New `PEFT.SSF` config group: `ENABLED`, `BLOCKS`, `LR`, `FREEZE_BACKBONE`, `MERGE_ON_SAVE`. | Toggle SSF entirely from YAML. |
+| [`solver/make_optimizer.py`](solver/make_optimizer.py) | SSF params get **10× BASE_LR** (or explicit `PEFT.SSF.LR`) and **zero weight decay**; AdamW built **without** global `lr`/`weight_decay` so per-group settings survive. | Matches SSF's higher-LR / no-decay recipe without breaking AdamW param groups. |
+| [`tests/`](tests/), [`tools/`](tools/) | Pytest integration suite + CLI sanity checkers. | Validate registration, freezing, gradients, identity init, and merge/unmerge. |
+
+---
+
+## Configuration Space
+
+SSF has **no rank hyperparameter**. We sweep two axes (paper §3.5):
+
+- **Depth (block coverage)** — same three regimes as the LoRA phase, set via `PEFT.SSF.BLOCKS`:
+  - `0–11` — full depth (`BLOCKS: ()`), all 12 blocks
+  - `4–11` — mid + late (`BLOCKS: (4,5,6,7,8,9,10,11)`)
+  - `6–11` — late only (`BLOCKS: (6,7,8,9,10,11)`)
+- **Optimizer configuration** — to control for the optimizer confound:
+  - **Case 1** — LoRA-matched recipe: AdamW, `BASE_LR = 3.0e-4`, `WEIGHT_DECAY = 0.05` (for fair cross-method comparison)
+  - **Case 2** — SSF paper official settings: AdamW, `BASE_LR = 3.5e-4`, `WEIGHT_DECAY = 1e-4`, `BIAS_LR_FACTOR = 2`
+
+Fixed training recipe across all runs: **60 epochs**, AdamW, linear warm-up + cosine decay,
+Market-1501 pipeline (256×128, random flip, random erasing, color jitter, ImageNet norm),
+single NVIDIA RTX 4000 Ada (20 GB). Seeds held constant to reduce variance.
+
+---
+
+## Results on Market-1501
+
+**Baseline (full fine-tuning):** mAP = **88.0 %**, Rank-1 = **94.4 %**, peak VRAM ≈ **11.5 GB**.
+
+**SSF (this repo)** — accuracy, memory, and trainable-parameter ratio:
+
+| Blocks | Case | mAP | Rank-1 | Rank-5 | GPU (GB) | Params (%) |
+|:------:|:----:|:---:|:------:|:------:|:--------:|:----------:|
+| Baseline (Full FT) | — | 88.0 | 94.4 | 98.2 | 11.5 | 100 % |
+| **0–11** | 1 | 79.7 | 91.0 | 96.9 | 10.1 | 2.87 % |
+| **0–11** | 2 | **79.9** | **91.1** | 97.1 | 10.0 | 2.83 % |
+| 4–11 | 1 | 74.1 | 88.0 | 95.7 | 9.43 | 2.85 % |
+| 4–11 | 2 | 74.5 | 88.0 | 95.8 | 9.45 | 2.85 % |
+| 6–11 | 1 | 68.5 | 84.3 | 94.4 | 9.18 | 2.83 % |
+| 6–11 | 2 | 68.9 | 84.7 | 94.6 | 9.25 | 2.83 % |
+
+**Key findings (SSF).**
+- **Full block coverage (0–11) is essential for SSF** — accuracy drops steeply under partial
+  coverage (a larger degradation than LoRA shows), suggesting SSF's feature-space modulation
+  relies more heavily on early-block representations.
+- **Optimizer choice is marginal** on Market-1501 (Case 1 vs. Case 2 differ by ≤ 0.4 % mAP),
+  though Case 2 is consistently a touch better.
+- **Parameter efficiency ≠ memory efficiency.** Despite training only ≈2.83–2.87 % of
+  parameters, peak VRAM does not drop proportionally — training memory is dominated by
+  **intermediate activations retained for backpropagation**, not by trainable parameter count.
+
+**How SSF compares to LoRA (from the paper).** LoRA at **blocks 4–11 (r=32, α=64)** gives the
+best accuracy–memory compromise (mAP ≈ 83.2 %, ≈25–30 % VRAM reduction), recovering more of the
+full-FT accuracy than SSF. SSF's advantage is its **ultra-compact, zero-inference-overhead**
+footprint — attractive when parameter storage/communication dominates (federated or multi-task
+sharing). The two methods are **complementary**: LoRA when accuracy recovery is paramount,
+SSF when parameter budget dominates. See the paper and the
+[companion LoRA repo](https://github.com/Huzaifa9559/PEFT-on-Transreid.git) for the full study.
+
+---
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
-(we use /torch 1.6.0 /torchvision 0.7.0 /timm 0.3.2 /cuda 10.1 / 16G or 32G V100 for training and evaluation.
-Note that we use torch.cuda.amp to accelerate speed of training which requires pytorch >=1.6)
+# Reference environment: torch 1.6.0, torchvision 0.7.0, timm 0.3.2, CUDA 10.1.
+# torch.cuda.amp is used to accelerate training and requires PyTorch >= 1.6.
 ```
 
-### Prepare Datasets
+## Prepare Data & Pretrained ViT
 
-```bash
-mkdir data
-```
-
-Download the person datasets [Market-1501](https://drive.google.com/file/d/0B8-rUzbwVRk0c054eEozWG9COHM/view), [MSMT17](https://arxiv.org/abs/1711.08565), [DukeMTMC-reID](https://arxiv.org/abs/1609.01775),[Occluded-Duke](https://github.com/lightas/Occluded-DukeMTMC-Dataset), and the vehicle datasets [VehicleID](https://www.pkuml.org/resources/pku-vehicleid.html), [VeRi-776](https://github.com/JDAI-CV/VeRidataset), 
-Then unzip them and rename them under the directory like
+Download **Market-1501** and unzip under `data/`:
 
 ```
 data
-├── market1501
-│   └── images ..
-├── MSMT17
-│   └── images ..
-├── dukemtmcreid
-│   └── images ..
-├── Occluded_Duke
-│   └── images ..
-├── VehicleID_V1.0
-│   └── images ..
-└── VeRi
+└── market1501
     └── images ..
 ```
 
-### Prepare DeiT or ViT Pre-trained Models
+Download the ImageNet-pretrained
+[ViT-Base](https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_224-80ecf9dd.pth)
+checkpoint and point `MODEL.PRETRAIN_PATH` at it in the config.
 
-You need to download the ImageNet pretrained transformer model : [ViT-Base](https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_224-80ecf9dd.pth), [ViT-Small](https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth), [DeiT-Small](https://dl.fbaipublicfiles.com/deit/deit_small_distilled_patch16_224-649709d9.pth), [DeiT-Base](https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_224-df68dfff.pth)
+> Update `DATASETS.ROOT_DIR`, `MODEL.PRETRAIN_PATH`, and `OUTPUT_DIR` in the YAML for your
+> machine (the shipped SSF configs contain example Windows paths).
 
-## Training
+## Training SSF
 
-We utilize 1  GPU for training.
-
-```bash
-python train.py --config_file configs/transformer_base.yml MODEL.DEVICE_ID "('your device id')" MODEL.STRIDE_SIZE ${1} MODEL.SIE_CAMERA ${2} MODEL.SIE_VIEW ${3} MODEL.JPM ${4} MODEL.TRANSFORMER_TYPE ${5} OUTPUT_DIR ${OUTPUT_DIR} DATASETS.NAMES "('your dataset name')"
-```
-
-#### Arguments
-
-- `${1}`: stride size for pure transformer, e.g. [16, 16], [14, 14], [12, 12]
-- `${2}`: whether using SIE with camera, True or False.
-- `${3}`: whether using SIE with view, True or False.
-- `${4}`: whether using JPM, True or False.
-- `${5}`: choose transformer type from `'vit_base_patch16_224_TransReID'`,(The structure of the deit is the same as that of the vit, and only need to change the imagenet pretrained model)  `'vit_small_patch16_224_TransReID'`,`'deit_small_patch16_224_TransReID'`,
-- `${OUTPUT_DIR}`: folder for saving logs and checkpoints, e.g. `../logs/market1501`
-
-**or you can directly train with following  yml and commands:**
+SSF is enabled entirely through the config. Two example configs are provided:
 
 ```bash
-# DukeMTMC transformer-based baseline
-python train.py --config_file configs/DukeMTMC/vit_base.yml MODEL.DEVICE_ID "('0')"
-# DukeMTMC baseline + JPM
-python train.py --config_file configs/DukeMTMC/vit_jpm.yml MODEL.DEVICE_ID "('0')"
-# DukeMTMC baseline + SIE
-python train.py --config_file configs/DukeMTMC/vit_sie.yml MODEL.DEVICE_ID "('0')"
-# DukeMTMC TransReID (baseline + SIE + JPM)
-python train.py --config_file configs/DukeMTMC/vit_transreid.yml MODEL.DEVICE_ID "('0')"
-# DukeMTMC TransReID with stride size [12, 12]
-python train.py --config_file configs/DukeMTMC/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"
+# SSF on Market-1501 — AdamW, paper-aligned recipe, all 12 blocks (recommended)
+python train.py --config_file configs/Market/vit_transreid_stride_ssf_new.yml MODEL.DEVICE_ID "('0')"
 
-# MSMT17
-python train.py --config_file configs/MSMT17/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"
-# OCC_Duke
-python train.py --config_file configs/OCC_Duke/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"
-# Market
-python train.py --config_file configs/Market/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"
-# VeRi
-python train.py --config_file configs/VeRi/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"
-
-# VehicleID (The dataset is large and we utilize 4 v100 GPUs for training )
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --master_port 66666 train.py --config_file configs/VehicleID/vit_transreid_stride.yml MODEL.DIST_TRAIN True
-#  or using following commands:
-Bash dist_train.sh 
+# SSF on Market-1501 — SGD variant
+python train.py --config_file configs/Market/vit_transreid_ssf.yml MODEL.DEVICE_ID "('0')"
 ```
 
-Tips:  For person datasets  with size 256x128, TransReID with stride occupies 12GB GPU memory and TransReID occupies 7GB GPU memory. 
+**Reproduce a specific depth/optimizer cell** by overriding on the command line, e.g. the
+4–11 regime under Case 2:
+
+```bash
+python train.py --config_file configs/Market/vit_transreid_stride_ssf_new.yml \
+  MODEL.DEVICE_ID "('0')" \
+  PEFT.SSF.BLOCKS "(4,5,6,7,8,9,10,11)" \
+  SOLVER.BASE_LR 3.5e-4 SOLVER.WEIGHT_DECAY 1e-4 SOLVER.BIAS_LR_FACTOR 2
+```
+
+**`PEFT.SSF` config knobs:**
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `ENABLED` | `False` | Master switch for SSF in the ViT backbone. |
+| `BLOCKS` | `()` | Empty = **all** 12 blocks; a tuple = only those block indices receive SSF-ADA. |
+| `LR` | `0.0` | `0.0` → use **10× `SOLVER.BASE_LR`** for SSF params; else this explicit LR. |
+| `FREEZE_BACKBONE` | `False` | With `ENABLED`, freezes all non-SSF params (incl. JPM `b1`/`b2`). |
+| `MERGE_ON_SAVE` | `False` | Reserved; merge helpers live in `model/peft/ssf.py` for manual/future use. |
 
 ## Evaluation
 
 ```bash
-python test.py --config_file 'choose which config to test' MODEL.DEVICE_ID "('your device id')" TEST.WEIGHT "('your path of trained checkpoints')"
+python test.py --config_file configs/Market/vit_transreid_stride_ssf_new.yml \
+  MODEL.DEVICE_ID "('0')" TEST.WEIGHT '<path/to/checkpoint.pth>'
 ```
 
-**Some examples:**
+Reports **mAP** and **CMC Rank-1/5/10** under the single-query Market-1501 protocol.
+
+## Verification & Sanity Tools
 
 ```bash
-# DukeMTMC
-python test.py --config_file configs/DukeMTMC/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"  TEST.WEIGHT '../logs/duke_vit_transreid_stride/transformer_120.pth'
-# MSMT17
-python test.py --config_file configs/MSMT17/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')" TEST.WEIGHT '../logs/msmt17_vit_transreid_stride/transformer_120.pth'
-# OCC_Duke
-python test.py --config_file configs/OCC_Duke/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')" TEST.WEIGHT '../logs/occ_duke_vit_transreid_stride/transformer_120.pth'
-# Market
-python test.py --config_file configs/Market/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')"  TEST.WEIGHT '../logs/market_vit_transreid_stride/transformer_120.pth'
-# VeRi
-python test.py --config_file configs/VeRi/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')" TEST.WEIGHT '../logs/veri_vit_transreid_stride/transformer_120.pth'
+# Pytest integration suite: registration, selective blocks, gradients, identity-init,
+# optimizer param groups, merge/unmerge helpers.
+pytest tests/test_ssf_integration.py
 
-# VehicleID (We test 10 times and get the final average score to avoid randomness)
-python test.py --config_file configs/VehicleID/vit_transreid_stride.yml MODEL.DEVICE_ID "('0')" TEST.WEIGHT '../logs/vehicleID_vit_transreid_stride/transformer_120.pth'
+# Load a YAML and print SSF parameter counts/names, or run a tiny CPU forward/backward.
+python tools/check_ssf.py --config_file configs/Market/vit_transreid_stride_ssf_new.yml
+python tools/check_ssf.py --cpu-only
+
+# Compare baseline vs. SSF loss curves on a tiny synthetic model (smoke test).
+python tools/short_train.py
 ```
 
-## Trained Models and logs (Size 256)
+---
 
-![framework](figs/sota.png)
+## Repository Layout
 
-<table>
-<thead>
-<tr><th style='text-align:center;' >Datasets</th><th style='text-align:center;' >MSMT17</th><th style='text-align:center;' >Market</th><th style='text-align:center;' >Duke</th><th style='text-align:center;' >OCC_Duke</th><th style='text-align:center;' >VeRi</th><th style='text-align:center;' >VehicleID</th></tr></thead>
-<tbody><tr><td style='text-align:center;' ><strong>Model</strong></td><td style='text-align:center;' >mAP | R1</td><td style='text-align:center;' >mAP | R1</td><td style='text-align:center;' >mAP | R1</td><td style='text-align:center;' >mAP | R1</td><td style='text-align:center;' >mAP | R1</td><td style='text-align:center;' >R1 | R5</td></tr><tr><td style='text-align:center;'rowspan="2" ><strong>Baseline(ViT)</strong></td>
-  <td style='text-align:center;' >61.8 | 81.8</td><td style='text-align:center;' >87.1 | 94.6</td><td style='text-align:center;' >79.6 | 89.0</td><td style='text-align:center;' >53.8 | 61.1</td><td style='text-align:center;' >79.0 | 96.6</td><td style='text-align:center;' >83.5 | 96.7</td></tr><tr>  <td style='text-align:center;' ><a href='https://drive.google.com/file/d/1iF5JNPw9xi-rLY3Ri9EY-PFAkK6Vg_Pf/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1oCnLpwv-V_RU7_BNXFsIgXKxAm2QAD7n/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1crYsKRrW4eUq6abT4KK8_atMLFsbq56W/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1YSo6FgJ42SOv3TTQvzE_4V1r3Ma608lZ/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/17GQqFuTleAZWLD92AtEd1c_dnTyZHl4k/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1a8Ci3qN4Y47LRWqgbeF4HJON1hBmeLCn/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1uHX5j7yepalN1EINdF9lzrT3iDWj-pr9/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1urUfrvML_7qKvqXyz6Yl4msJS6nTNbe5/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1Qu13CS5MK1ANsXoYgkX5Kji383SbQbn9/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/17Io4ECJixITduJ-bey7yix1Unwv9PBKd/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1loUlRlM9DCiIAkq5mpL4LrJiUC3G3fMp/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/12gOI9fivkRj5utCPciKS6Z1SNM8V2SGT/view?usp=sharing'>test</a></td></tr><tr><td style='text-align:center;'rowspan="2" ><strong>TransReID<sup>*</sup>(ViT)</strong></td>
-  <td style='text-align:center;' >67.8 | 85.3</td><td style='text-align:center;' >89.0 | 95.1</td><td style='text-align:center;' >82.2 | 90.7</td><td style='text-align:center;' >59.5 | 67.4</td><td style='text-align:center;' >82.1 | 97.4</td><td style='text-align:center;' >85.2 | 97.4</td></tr><tr>
-  <td style='text-align:center;' ><a href='https://drive.google.com/file/d/1x6Na97ycxS0t2Dn_0iRKWe1U5ccIqASK/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/14TPDaU2T0WLTsg0iEHJFnqwzSTrpzC0B/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/11p4RjmpCGGAS-876VEt7OoFrUeHTUlyO/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1SWNtnhEVoDu3Uixf5XBCQlvXYapVrk7w/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1BipxoqyThefQviJzuJIKtFJvNblIlPGN/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/11dE_kbNWbvmo-3qUShN7qsrTsqd89Eoc/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1VJg4rTA43TCHkR9hTIBu8S2Sy1KiTnSJ/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1I1xTSBl1v-QBSyxxAB7xIszW_fu9oT6g/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1SquTlBhl_pahsa5752KoGDBPY-AZpoSg/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1H3MpDrA61HMmo8x8teANpCxY7BoGo09r/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/13ArCZutLuFrAoZpBuuk1y3EW91cYubmU/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1ibJjqyLFvMv8vO9WanVi-5pYsJD4LY7K/view?usp=sharing'>test</a></td></tr><tr><td style='text-align:center;'rowspan="2" ><strong>TransReID<sup>*</sup>(DeiT)</strong></td>
-  <td style='text-align:center;' >66.3 | 84.0</td><td style='text-align:center;' >88.5 | 95.1</td><td style='text-align:center;' >81.9 | 90.7</td><td style='text-align:center;' >57.7 | 65.2</td><td style='text-align:center;' >82.4 | 97.1</td><td style='text-align:center;' >86.0 | 97.6</td></tr><tr>
-  <td style='text-align:center;' ><a href='https://drive.google.com/file/d/1WSUD0gKjGIG_gzTc2izH_y-EuDzweN95/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1-YWh-Z1JVN8xzjG7PNyN2TpWN4Z1eUvP/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1cbUK2KozdPSoewzvF0ucFQnZ0yfZiu_H/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1C9glb0kc5thfU3U9Yrr6z7h5oYgMwHfy/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1ltaX9zGFO31Wwwu47K9c4WTTBZVLdzLw/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/13H9usPg7pG5b6Eglx0EiKDiU6n3chBnT/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1YJkBiMb5oVBnO6GXYW3Y_hFkR-Pl5ikC/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1xnPlCw3w5obBpEAaI8Sb7Z5Bh9dPcZtL/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1n26yrqTwu8bvaS-L_8mmiPlIrw_2_Ryo/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/11hTccnvJCi8Be_1fArX3mWqgdwOarxAf/view?usp=sharing'>log</a></td><td style='text-align:center;' ><a href='https://drive.google.com/file/d/1YC8dvKiCg5qCKpRc4kHemaUdFdBePkAk/view?usp=sharing'>model</a> | <a href='https://drive.google.com/file/d/1cELmjTLj5Lo9QwJuDGbqftwjeYAQD17k/view?usp=sharing'>test</a></td></tr></tbody>
-</table>
+Files that are **new or modified** for SSF (everything else is stock TransReID):
 
-Note: We reorganize code and the performances are slightly different from the paper's.
+```
+model/peft/ssf.py                 SSF module + merge/unmerge helpers
+model/peft/__init__.py            PEFT package exports
+model/backbones/vit_pytorch.py    SSF-ADA placement in Block + TransReID; factory args
+model/make_model.py               _freeze_non_ssf; JPM deepcopy + freeze order
+config/defaults.py                PEFT.SSF config group
+solver/make_optimizer.py          SSF LR multiplier, zero WD, AdamW param-group fix
+configs/Market/vit_transreid_stride_ssf_new.yml   AdamW / paper-aligned SSF config
+configs/Market/vit_transreid_ssf.yml              SGD SSF config
+tests/test_ssf_integration.py     Automated SSF tests
+tools/check_ssf.py                CLI SSF sanity check
+tools/short_train.py              Tiny-model training sanity check
+SSF_ON_TRANSREID_IMPLEMENTATION.md  Detailed implementation notes
+```
 
-## Acknowledgement
-
-Codebase from [reid-strong-baseline](https://github.com/michuanhaohao/reid-strong-baseline) , [pytorch-image-models](https://github.com/rwightman/pytorch-image-models)
-
-We import veri776 viewpoint label from repo: https://github.com/Zhongdao/VehicleReIDKeyPointData
+---
 
 ## Citation
 
-If you find this code useful for your research, please cite our paper
+If you use this code or the SSF study, please cite our paper and the original TransReID:
 
-```
-@InProceedings{He_2021_ICCV,
-    author    = {He, Shuting and Luo, Hao and Wang, Pichao and Wang, Fan and Li, Hao and Jiang, Wei},
-    title     = {TransReID: Transformer-Based Object Re-Identification},
-    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-    month     = {October},
-    year      = {2021},
-    pages     = {15013-15022}
+```bibtex
+@article{naseer2025peft_transreid,
+  title   = {Efficient Person Re-Identification via LoRA and SSF: A Comparative PEFT
+             Study on ViT Backbone in TransReID},
+  author  = {Naseer, Huzaifa and Rehman, Tameema and Ashfaq, Anas and Syed, Farrukh Hasan},
+  year    = {2025}
+}
+
+@inproceedings{He_2021_ICCV,
+  author    = {He, Shuting and Luo, Hao and Wang, Pichao and Wang, Fan and Li, Hao and Jiang, Wei},
+  title     = {TransReID: Transformer-Based Object Re-Identification},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+  year      = {2021},
+  pages     = {15013--15022}
+}
+
+@inproceedings{lian2022ssf,
+  author    = {Lian, Dongze and Zhou, Daquan and Feng, Jiashi and Wang, Xinchao},
+  title     = {Scaling \& Shifting Your Features: A New Baseline for Efficient Model Tuning},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022}
 }
 ```
 
-## Contact
+## Acknowledgement
 
-If you have any question, please feel free to contact us. E-mail: [shuting_he@zju.edu.cn](mailto:shuting_he@zju.edu.cn) , [haoluocsc@zju.edu.cn](mailto:haoluocsc@zju.edu.cn)
-
+Built on the official [TransReID](https://github.com/damo-cv/TransReID) codebase, which in turn
+draws from [reid-strong-baseline](https://github.com/michuanhaohao/reid-strong-baseline) and
+[pytorch-image-models](https://github.com/rwightman/pytorch-image-models). The SSF method is due
+to Lian *et al.* (NeurIPS 2022). Companion LoRA phase:
+[PEFT-on-Transreid](https://github.com/Huzaifa9559/PEFT-on-Transreid.git).
